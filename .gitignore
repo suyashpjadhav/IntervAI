@@ -3,4 +3,5 @@ node_modules/
 dist/
 build/
 .vscode/
+coverage/
 project_doc.md

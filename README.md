@@ -12,11 +12,12 @@ IntervAI is a full-stack, enterprise-grade web application designed to help cand
 - [Database Schemas](#database-schemas)
 - [API Routes](#api-routes)
 - [Third-Party Integrations](#third-party-integrations)
-- [Visual Previews](#visual-previews)
 - [Environment Variables](#environment-variables)
 - [Getting Started](#getting-started)
+- [Docker Deployment](#docker-deployment)
+- [Automated Testing & Coverage](#automated-testing--coverage)
+- [Continuous Integration (CI)](#continuous-integration-ci)
 - [Dependencies](#dependencies)
-- [License](#license)
 
 ---
 
@@ -103,37 +104,48 @@ IntervAI uses a modern client-server architecture split between a React SPA clie
 
 ```
 IntervAI/
+├── .github/
+│   └── workflows/              # GitHub Actions CI workflow (test.yml)
 ├── Backend/
 │   ├── src/
 │   │   ├── config/             # Database (MongoDB) and Redis (ioredis) configurations
 │   │   ├── controllers/        # Controllers (Auth, Interview Reports, Mock Interviews)
 │   │   ├── middlewares/        # JWT Authentication and Multer file upload handlers
-│   │   ├── models/             # Mongoose Schemas (User, InterviewReport, MockInterview)
+│   │   ├── models/             # Mongoose Schemas (User, InterviewReport, MockInterview, Blacklist)
 │   │   ├── queues/             # BullMQ queue definitions (report.queue.js)
 │   │   ├── routes/             # API Endpoints (/api/auth, /api/interview)
 │   │   ├── services/           # Service layers (OpenAI, Puppeteer PDF compiler)
 │   │   └── workers/            # Background job workers (report.worker.js)
+│   ├── tests/                  # Automated test suites (Jest + Supertest + In-Memory Mongo)
+│   ├── Dockerfile              # Debian Slim container with system Chromium dependencies
+│   ├── jest.config.js          # Jest runner settings and timeout configurations
 │   ├── server.js               # Express application server mount & graceful shutdown
 │   └── package.json            # Server configuration and dependencies
 │
-└── Frontend/
-    ├── public/
-    │   └── templates/          # PNG layout previews for resume styling switchers
-    ├── src/
-    │   ├── assets/             # Brand logos and style presets
-    │   ├── features/
-    │   │   ├── auth/           # Login, Register pages, auth context hooks, API interfaces
-    │   │   └── interview/      # Mock practice dashboards, PDF canvas renders, strategy panels
-    │   │       ├── components/ # AtsStandardTemplate, MockInterviewPanel, PdfViewer
-    │   │       ├── hooks/      # Hooks (useInterview.js) for report actions and status polling
-    │   │       ├── pages/      # Home, Interview Report dashboard
-    │   │       ├── services/   # Axios API configurations
-    │   │       └── style/      # SCSS visual styling modules
-    │   ├── app.routes.jsx      # React router navigation bindings
-    │   ├── App.jsx             # Top level layout wrappers
-    │   ├── main.jsx            # DOM loader mount
-    │   └── style.scss          # General styles imports
-    └── package.json            # Client configuration and dependencies
+├── Frontend/
+│   ├── public/
+│   │   └── templates/          # PNG layout previews for resume styling switchers
+│   ├── src/
+│   │   ├── assets/             # Brand logos and style presets
+│   │   ├── features/
+│   │   │   ├── auth/           # Login, Register pages, auth context hooks, API interfaces
+│   │   │   └── interview/      # Mock practice dashboards, PDF canvas renders, strategy panels
+│   │   │       ├── components/ # AtsStandardTemplate, MockInterviewPanel, PdfViewer
+│   │   │       ├── hooks/      # Hooks (useInterview.js) for report actions and status polling
+│   │   │       ├── pages/      # Home, Interview Report dashboard
+│   │   │       ├── services/   # Axios API configurations
+│   │   │       └── style/      # SCSS visual styling modules
+│   │   ├── app.routes.jsx      # React router navigation bindings
+│   │   ├── App.jsx             # Top level layout wrappers
+│   │   ├── main.jsx            # DOM loader mount
+│   │   └── style.scss          # General styles imports
+│   ├── Dockerfile              # Multi-stage React build with Nginx SPA server
+│   ├── nginx.conf              # SPA routing reverse proxy configuration
+│   └── package.json            # Client configuration and dependencies
+│
+├── .env.example                # Sanitized environment template for local & Docker setups
+├── docker-compose.yml          # Multi-container orchestration (Backend, Frontend, Mongo, Redis, Worker)
+└── README.md
 ```
 
 ---
@@ -244,32 +256,25 @@ IntervAI/
 ## Third-Party Integrations
 
 ### 1. OpenAI SDK (`gpt-4o-mini`)
-Used to analyze candidate resumes against target job descriptions, tailor technical experience bullets, compile Motivated Defense parameters, and grade interview answers. Outputs are structured using strict Mongoose/Zod schema validation.
+Used to analyze candidate resumes against target job descriptions, tailor technical experience bullets, compile Motivated Defense parameters, and grade interview answers. Outputs are structured using strict Mongoose and Zod schema validation.
 
 ### 2. BullMQ & Redis (Upstash)
 Handles heavy background generation jobs asynchronously. Prevents HTTP request timeouts during long LLM inferences and provides automated retries with exponential backoff. Also caches refined resumes under SHA-256 keys with a 24-hour TTL.
 
 ### 3. Puppeteer (Headless PDF Compilation)
-Spawns a headless browser on the server side, loads tailored HTML resume layouts matching LaTeX and Modern preset templates, applies print stylesheets, and exports print-ready A4 PDF files with selectable text.
+Spawns a headless browser on the server side, loads tailored HTML resume layouts matching LaTeX and Modern preset templates, applies print stylesheets, and exports print-ready A4 PDF files with selectable text. Configured with system Chromium dependencies in Docker containers.
 
 ### 4. PDF.js (CDN Canvas Renderer)
 Allows real-time browser previewing of original PDF resumes. Dynamic-loads libraries inside the client and draws PDF binary structures onto HTML canvas layers.
 
 ---
 
-## Visual Previews
-
-### Dashboard & Sidebar View
-![Dashboard View](assets/dashboard_preview.png)
-
-### Mock Interview Practice Terminal
-![Mock Interview Terminal](assets/interview_preview.png)
-
----
 
 ## Environment Variables
 
-### Backend (`Backend/.env`)
+All secrets and keys are read from `Backend/.env`. The root `.env.example` provides a template:
+
+### Backend Configuration (`Backend/.env`)
 ```env
 PORT=3000
 MONGO_URI=mongodb+srv://<username>:<password>@cluster.mongodb.net/intervai
@@ -281,7 +286,7 @@ NODE_ENV=production
 FRONTEND_URL=https://your-frontend.vercel.app
 ```
 
-### Frontend (`Frontend/.env`)
+### Frontend Configuration (`Frontend/.env`)
 ```env
 VITE_API_URL=https://your-backend.onrender.com
 ```
@@ -296,7 +301,7 @@ VITE_API_URL=https://your-backend.onrender.com
 * **Redis** (Local instance or Upstash Cloud connection string)
 * **OpenAI API Key** (`sk-proj-...`)
 
-### Installation
+### Installation & Local Run
 
 1. **Clone the Repository**:
    ```bash
@@ -322,6 +327,88 @@ VITE_API_URL=https://your-backend.onrender.com
 
 ---
 
+## Docker Deployment
+
+The application is completely containerized with Docker and Docker Compose.
+
+### Services Defined:
+1. `intervai-backend`: Node.js Express server on port 3000 with system Chromium dependencies for Puppeteer.
+2. `intervai-frontend`: Production React build served via Nginx on port 80.
+3. `intervai-mongo`: MongoDB 7.0 database container on port 27017 with automated healthcheck.
+4. `intervai-redis`: Redis 7 Alpine cache and BullMQ broker on port 6379 with automated healthcheck.
+5. `intervai-worker`: Dedicated BullMQ worker container listening for background resume parsing jobs.
+
+### Running with Docker Compose:
+
+1. Ensure Docker Desktop is installed and running.
+2. Ensure your `Backend/.env` contains your OpenAI API key and secrets (Docker Compose reads directly from `Backend/.env`).
+3. Build and launch all 5 services:
+   ```bash
+   docker compose up --build -d
+   ```
+4. Check running containers:
+   ```bash
+   docker compose ps
+   ```
+5. View real-time logs:
+   ```bash
+   docker compose logs -f
+   ```
+6. Stop containers:
+   ```bash
+   docker compose down
+   ```
+
+Access the app:
+* **Frontend**: [http://localhost](http://localhost) (port 80)
+* **Backend API**: [http://localhost:3000](http://localhost:3000)
+
+---
+
+## Automated Testing & Coverage
+
+The repository features comprehensive automated test suites using **Jest**, **Supertest**, **mongodb-memory-server**, and **ioredis-mock**, allowing all tests to run offline, fast, and for free without consuming OpenAI credits.
+
+### Test Suites:
+1. **Auth & Security** (`tests/auth.test.js`): User registration, duplicate validation, login credentials, JWT cookie issuance, token tamper rejection, expiration rejection, and logout blacklist revocation.
+2. **Resume Parsing & Reports** (`tests/interview.test.js`): Multipart PDF upload, text-only fallback, HTTP 202 background job dispatch, status polling, report retrieval, and roadmap task toggling.
+3. **Schema Validation** (`tests/schema.test.js`): Zod schemas for LLM structured output (`RefinedResumeSchema`, `StrategicQuestionSchema`) and Mongoose model boundary constraints.
+4. **BullMQ Queue & Worker** (`tests/queue.test.js`): Exponential retry backoff, job enqueueing, worker status progression to `completed`, double-agent ATS scoring safeguard, and retry exhaustion failure handling.
+5. **Redis Caching** (`tests/cache.test.js`): Cache miss query to OpenAI, cache hit bypass of LLM calls (24h TTL), and instant template switching reuse.
+6. **Resilience & Error Handling** (`tests/error.test.js`): OpenAI 429 rate limit and 401 auth failure recovery, and Redis connection outage fallback to in-process execution.
+
+### Running Tests:
+
+Run the full test suite:
+```bash
+cd Backend
+npm test
+```
+
+Run with full code coverage:
+```bash
+cd Backend
+npm run test:coverage
+```
+
+### Coverage Results:
+* **Test Suites**: 6 passed, 6 total
+* **Total Tests**: 42 passed, 0 failed
+* **Statements**: 58.19%
+* **Branches**: 43.10%
+* **Lines**: 59.48%
+
+---
+
+## Continuous Integration (CI)
+
+A GitHub Actions workflow is configured in `.github/workflows/test.yml`:
+* Triggers automatically on every `push` and `pull_request` to `main` and `master`.
+* Spins up an automated `redis:7-alpine` service container.
+* Installs dependencies and runs the full test suite with coverage (`npm run test:coverage`).
+
+---
+
 ## Dependencies
 
 ### Backend Dependencies
@@ -333,6 +420,7 @@ VITE_API_URL=https://your-backend.onrender.com
 | `mongoose` | ^9.2.3 | MongoDB ODM |
 | `openai` | ^6.27.0 | OpenAI SDK (Resume tailoring, transcript grading) |
 | `@google/genai` | ^1.44.0 | Google GenAI SDK |
+| `zod` | ^3.24.2 | Strict schema validation for LLM outputs |
 | `pdf-parse` | ^1.1.1 | PDF raw text extractor |
 | `puppeteer` | ^24.38.0 | Headless PDF compiler |
 | `jsonwebtoken` | ^9.0.3 | Session auth token generation |
@@ -349,7 +437,4 @@ VITE_API_URL=https://your-backend.onrender.com
 | `axios` | ^1.13.6 | Promise-based HTTP Client |
 | `sass` | ^1.97.3 | SCSS styling compilation |
 
----
 
-## License
-Distributed under the MIT License. See `LICENSE` for more information.

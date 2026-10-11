@@ -1,0 +1,47 @@
+name: IntervAI Backend Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Run Backend Test Suite
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: Backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: Backend
+        run: npm ci
+
+      - name: Run Jest test suite with coverage
+        working-directory: Backend
+        env:
+          JWT_SECRET: ci-test-jwt-secret-key-1234567890
+          OPENAI_API_KEY: sk-dummy-key-for-testing-ci
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+        run: npm run test:coverage
