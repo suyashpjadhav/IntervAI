@@ -35,12 +35,13 @@ jobs:
 
       - name: Install dependencies
         working-directory: Backend
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
       - name: Run Jest test suite with coverage
         working-directory: Backend
         env:
           JWT_SECRET: ci-test-jwt-secret-key-1234567890
+          OPEN_API_KEY: sk-dummy-key-for-testing-ci
           OPENAI_API_KEY: sk-dummy-key-for-testing-ci
           REDIS_URL: redis://localhost:6379
           NODE_ENV: test
