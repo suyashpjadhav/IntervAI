@@ -36,6 +36,14 @@ export const generateInterviewReport = async ({ jobDescription, selfDescription,
 }
 
 /**
+ * @description Poll the processing status of an in-progress background report job.
+ */
+export const getReportStatus = async (reportId) => {
+    const response = await api.get(`/api/interview/report/${reportId}/status`)
+    return response.data
+}
+
+/**
  * @description Service to change resume template.
  */
 export const changeResumeTemplate = async ({ interviewReportId, template }) => {
@@ -117,5 +125,13 @@ export const endMockInterviewApi = async ({ sessionId }) => {
  */
 export const getMockSessionsApi = async (reportId) => {
     const response = await api.get(`/api/interview/mock/sessions/${reportId}`)
+    return response.data
+}
+
+/**
+ * @description Service to update preparation plan task completion status.
+ */
+export const updatePreparationTaskApi = async ({ reportId, day, taskIndex, completed }) => {
+    const response = await api.patch(`/api/interview/report/${reportId}/plan`, { day, taskIndex, completed })
     return response.data
 }

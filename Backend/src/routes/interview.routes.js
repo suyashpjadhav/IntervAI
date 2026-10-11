@@ -23,11 +23,25 @@ interviewRouter.post("/", authMiddleware.authUser, upload.single("resume"), inte
 interviewRouter.get("/report/:interviewId", authMiddleware.authUser, interviewController.getInterviewReportByIdController)
 
 /**
+ * @route GET /api/interview/report/:reportId/status
+ * @description Poll the processing status of a background report generation job.
+ * @access private
+ */
+interviewRouter.get("/report/:reportId/status", authMiddleware.authUser, interviewController.getReportStatusController)
+
+/**
  * @route GET /api/interview/report/:interviewId/original-resume
  * @description get the original resume file binary.
  * @access private
  */
 interviewRouter.get("/report/:interviewId/original-resume", authMiddleware.authUser, interviewController.getOriginalResumeController)
+
+/**
+ * @route PATCH /api/interview/report/:reportId/plan
+ * @description Update preparation plan task completion status.
+ * @access private
+ */
+interviewRouter.patch("/report/:reportId/plan", authMiddleware.authUser, interviewController.updatePreparationPlanTaskController)
 
 
 /**

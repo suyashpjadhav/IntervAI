@@ -59,8 +59,15 @@ const preparationPlanSchema = new mongoose.Schema({
         required: [ true, "Focus is required" ]
     },
     tasks: [ {
-        type: String,
-        required: [ true, "Task is required" ]
+        _id: false,
+        description: {
+            type: String,
+            required: [ true, "Task description is required" ]
+        },
+        completed: {
+            type: Boolean,
+            default: false
+        }
     } ]
 })
 
@@ -129,6 +136,11 @@ const interviewReportSchema = new mongoose.Schema({
     user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "users"
+    },
+    status: {
+        type: String,
+        enum: [ "pending", "processing", "completed", "failed" ],
+        default: "completed"
     },
     title: {
         type: String,

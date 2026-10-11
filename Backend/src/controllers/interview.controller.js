@@ -1,7 +1,10 @@
 const pdfParse = require("pdf-parse")
 const zlib = require("zlib")
-const { generateInterviewReport, generateResumePdf, generateResumeHtmlAndScore } = require("../services/ai.service")
+const { generateResumePdf, generateResumeHtmlAndScore } = require("../services/ai.service")
 const interviewReportModel = require("../models/interviewReport.model")
+
+const reportQueue = require("../queues/report.queue")
+const { processReportJob } = require("../workers/report.worker")
 
 function detectPdfFont(buffer) {
     if (!buffer) return "Arial, Helvetica, sans-serif";
@@ -163,6 +166,8 @@ function extractPdfUrls(buffer) {
 
 /**
  * @description Controller to generate interview report based on user self description, resume and job description.
+ * Immediately creates a placeholder report in MongoDB, enqueues a BullMQ background job,
+ * and returns 202 Accepted with the reportId so the frontend can poll /status.
  */
 async function generateInterViewReportController(req, res) {
     try {
@@ -177,48 +182,19 @@ async function generateInterViewReportController(req, res) {
                 .replace(/§/g, "▪")
                 .replace(/🕿/g, "📞")
                 .replace(/\uFFFD/g, "")
-            
+
             detectedFont = detectPdfFont(req.file.buffer)
             extractedUrls = extractPdfUrls(req.file.buffer)
         }
+
         const { selfDescription, jobDescription, template = "early", preparationDays } = req.body
 
-        let parsedPreparationDays = parseInt(preparationDays, 10);
+        let parsedPreparationDays = parseInt(preparationDays, 10)
         if (isNaN(parsedPreparationDays) || parsedPreparationDays <= 0) {
-            parsedPreparationDays = 7;
+            parsedPreparationDays = 7
         }
 
-        const [interViewReportByAi, refinedResumeByAi] = await Promise.all([
-            generateInterviewReport({
-                resume: resumeContent,
-                selfDescription,
-                jobDescription,
-                preparationDays: parsedPreparationDays
-            }),
-            generateResumeHtmlAndScore({
-                resume: resumeContent,
-                selfDescription,
-                jobDescription,
-                template,
-                fontFamily: detectedFont,
-                extractedUrls
-            })
-        ])
-
-        const originalScore = interViewReportByAi.metadata?.matchScoreOriginal || 50;
-        let refinedScore = refinedResumeByAi.matchScoreRefined;
-        let isOriginalResumeOptimal = false;
-
-        if (refinedScore < originalScore) {
-            refinedScore = originalScore;
-            isOriginalResumeOptimal = true;
-        }
-
-        const reportMetadata = {
-            ...(interViewReportByAi.metadata || {}),
-            isOriginalResumeOptimal
-        };
-
+        // 1. Create a minimal placeholder document so the frontend has an ID immediately
         const interviewReport = await interviewReportModel.create({
             user: req.user.id,
             resume: resumeContent,
@@ -228,47 +204,84 @@ async function generateInterViewReportController(req, res) {
             extractedUrls,
             selfDescription,
             jobDescription,
-            matchScore: refinedScore,
-            matchScoreOriginal: originalScore,
-            matchScoreRefined: refinedScore,
-            refinedResumeHtml: refinedResumeByAi.html,
-            refinedResumeData: refinedResumeByAi.data,
             selectedTemplate: template,
             preparationDays: parsedPreparationDays,
-            title: interViewReportByAi.metadata?.title || "Tailored Position",
-            projectQuestions: interViewReportByAi.projectQuestions,
-            workExperienceQuestions: interViewReportByAi.workExperienceQuestions,
-            behavioralQuestions: interViewReportByAi.behavioralQuestions,
-            metadata: reportMetadata,
-            skillGaps: interViewReportByAi.skillGaps,
-            preparationPlan: interViewReportByAi.preparationPlan
+            title: "Processing...",
+            status: "pending"
         })
 
-        res.status(201).json({
-            message: "Interview report generated successfully.",
-            interviewReport
+        // 2. Enqueue the heavy LLM work to Redis BullMQ queue (with in-process fallback if Redis is offline)
+        let enqueued = false
+        if (typeof reportQueue.isQueueAvailable === "function") {
+            const isReady = await reportQueue.isQueueAvailable(1200)
+            if (isReady) {
+                try {
+                    await reportQueue.add(
+                        "generate-report",
+                        { reportId: interviewReport._id.toString() },
+                        { jobId: interviewReport._id.toString() }
+                    )
+                    enqueued = true
+                } catch (queueErr) {
+                    console.warn("[Queue Warning] Redis queue add failed:", queueErr.message)
+                }
+            }
+        }
+
+        if (!enqueued) {
+            console.log("[Worker Notice] Redis queue offline/unreachable. Processing report asynchronously in-process.")
+            setImmediate(async () => {
+                try {
+                    await processReportJob({
+                        id: `local-${interviewReport._id}`,
+                        data: { reportId: interviewReport._id.toString() }
+                    })
+                } catch (jobErr) {
+                    console.error("[Local Background Job Error]:", jobErr)
+                    await interviewReportModel.findByIdAndUpdate(interviewReport._id, { status: "failed" }).catch(() => {})
+                }
+            })
+        }
+
+        // 3. Return 202 immediately — frontend will poll /status
+        res.status(202).json({
+            message: "Report generation started.",
+            reportId: interviewReport._id
         })
 
-    }
-    
-    catch (error) {
+
+    } catch (error) {
         console.log(error)
-
-        if (error?.status === 429) {
-            return res.status(429).json({
-                message: "AI quota exceeded or rate limit reached. Please wait a moment and try again."
-            })
-        }
-
-        if (error?.status === 401) {
-            return res.status(500).json({
-                message: "Invalid OpenAI API key. Please check your OPEN_API_KEY in the .env file."
-            })
-        }
-
         res.status(500).json({
-            message: "Error generating interview report."
+            message: "Error starting report generation."
         })
+    }
+}
+
+
+/**
+ * @description Controller to poll the status of an in-progress report job.
+ * @route GET /api/interview/report/:reportId/status
+ */
+async function getReportStatusController(req, res) {
+    try {
+        const { reportId } = req.params
+
+        const report = await interviewReportModel
+            .findOne({ _id: reportId, user: req.user.id })
+            .select("status")
+
+        if (!report) {
+            return res.status(404).json({ message: "Report not found." })
+        }
+
+        res.status(200).json({
+            reportId,
+            status: report.status || "pending"
+        })
+    } catch (error) {
+        console.error(error)
+        res.status(500).json({ message: "Error fetching report status." })
     }
 }
 
@@ -442,11 +455,87 @@ async function getOriginalResumeController(req, res) {
     }
 }
 
+/**
+ * @description Controller to update preparation plan task completion status.
+ */
+async function updatePreparationPlanTaskController(req, res) {
+    try {
+        const { reportId } = req.params
+        const { day, taskIndex, completed } = req.body
+
+        if (day === undefined || taskIndex === undefined || completed === undefined) {
+            return res.status(400).json({
+                message: "Missing required fields: day, taskIndex, completed"
+            })
+        }
+
+        const interviewReport = await interviewReportModel.findOne({ _id: reportId, user: req.user.id })
+
+        if (!interviewReport) {
+            return res.status(404).json({
+                message: "Interview report not found."
+            })
+        }
+
+        const dayEntry = interviewReport.preparationPlan.find(d => d.day === day)
+        if (!dayEntry) {
+            return res.status(400).json({
+                message: `Day ${day} not found in preparation plan.`
+            })
+        }
+
+        if (taskIndex < 0 || taskIndex >= dayEntry.tasks.length) {
+            return res.status(400).json({
+                message: `Task index ${taskIndex} is out of bounds for Day ${day}.`
+            })
+        }
+
+        // Gracefully migrate / format all tasks in the preparation plan to matching objects to avoid validation errors
+        interviewReport.preparationPlan = interviewReport.preparationPlan.map(d => {
+            const mappedTasks = d.tasks.map((task, idx) => {
+                const isTarget = d.day === day && idx === taskIndex
+                if (typeof task === 'string') {
+                    return {
+                        description: task,
+                        completed: isTarget ? completed : false
+                    }
+                } else {
+                    return {
+                        description: task.description,
+                        completed: isTarget ? completed : !!task.completed
+                    }
+                }
+            })
+            return {
+                day: d.day,
+                focus: d.focus,
+                tasks: mappedTasks
+            }
+        })
+
+        interviewReport.markModified('preparationPlan')
+        await interviewReport.save()
+
+        res.status(200).json({
+            message: "Preparation plan task updated successfully.",
+            preparationPlan: interviewReport.preparationPlan
+        })
+
+    } catch (error) {
+        console.error("Error updating preparation plan task:", error)
+        res.status(500).json({
+            message: "Error updating preparation plan task."
+        })
+    }
+}
+
 module.exports = { 
     generateInterViewReportController, 
+    getReportStatusController,
     getInterviewReportByIdController, 
     getAllInterviewReportsController, 
     generateResumePdfController,
     changeResumeTemplateController,
-    getOriginalResumeController
+    getOriginalResumeController,
+    updatePreparationPlanTaskController
 }

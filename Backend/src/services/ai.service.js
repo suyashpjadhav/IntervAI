@@ -1,8 +1,10 @@
 const OpenAI = require("openai")
-const puppeteer = require("puppeteer")
+const puppeteerService = require("./puppeteer.service")
 const pdfParse = require("pdf-parse")
 const { z } = require("zod")
 const { zodResponseFormat } = require("openai/helpers/zod")
+const redis = require("../config/redis.config")
+const crypto = require("crypto")
 
 const openai = new OpenAI({
     apiKey: process.env.OPEN_API_KEY
@@ -42,7 +44,10 @@ const InterviewStrategyOutputSchema = z.object({
   preparationPlan: z.array(z.object({
     day: z.number(),
     focus: z.string(),
-    tasks: z.array(z.string())
+    tasks: z.array(z.object({
+      description: z.string(),
+      completed: z.boolean().default(false)
+    }))
   }))
 });
 
@@ -52,7 +57,7 @@ async function generateInterviewReport({ resume, selfDescription, jobDescription
 CRITICAL SIZING REQUIREMENT:
 - You MUST generate AT LEAST 10 distinct questions in the 'projectQuestions' array.
 - You MUST generate AT LEAST 10 distinct questions in the 'workExperienceQuestions' array.
-- You MUST construct a step-by-step preparation plan roadmap in the 'preparationPlan' array spanning exactly ${preparationDays} days, where each item in the array corresponds to Day 1, Day 2, ... up to Day ${preparationDays} sequentially. Do not generate plan for any other number of days than ${preparationDays}.
+- You MUST construct a step-by-step preparation plan roadmap in the 'preparationPlan' array spanning exactly ${preparationDays} days, where each item in the array corresponds to Day 1, Day 2, ... up to Day ${preparationDays} sequentially. Do not generate plan for any other number of days than ${preparationDays}. For each day, the 'tasks' array must consist of objects, where each object contains a 'description' field detailing the preparation task.
 - This is a strict schema and operational constraint. Even if the candidate has only one project or only one work experience entry, do not group questions or stop early. Instead, generate multiple separate questions targeting different aspects of that single entry (e.g., separate questions on different bullet points, technical stack choices, scalability challenges, testing strategies, data storage, integration details, error handling, etc.), or ask how the specific technologies/experiences from that entry relate to concepts in the [JOB DESCRIPTION].
 
 RULE 1 (QUESTION STYLING & INTERVIEW STYLE):
@@ -71,7 +76,14 @@ RULE 3 (DEFENSE FORMULA):
 Every strategic answer MUST strictly provide:
 - openingHook: A single concise sentence validating the interviewer's premise/scenario.
 - coreDefense: The technical justification using the STAR (Situation, Task, Action, Result) method.
-- preemptiveTradeoff: An explicit, mature admission of a technical trade-off made (e.g., choice of performance over simplicity, memory over CPU, or consistency over availability).`;
+- preemptiveTradeoff: An explicit, mature admission of a technical trade-off made (e.g., choice of performance over simplicity, memory over CPU, or consistency over availability).
+
+RULE 4 (RESUME-JD CROSS EXAMINATION — apply before generating any project/experience question):
+- Identify the 3-4 most critical, non-negotiable requirements implied by the [JOB DESCRIPTION] (core tech stack, seniority level, domain expertise, or scale expectations).
+- Cross-reference these against the candidate's resume to find: (a) claims that directly overlap with those critical requirements — weight MORE questions toward stress-testing these, since they matter most to this specific role, and (b) claims that are vague, unquantified, or buzzword-heavy (e.g., "improved performance", "worked with microservices", "led a team") — for each such claim, generate at least one question that forces the candidate to quantify or specify it precisely (numbers, mechanism, decision process), the way a skeptical recruiter would push back on unsubstantiated resume language.
+- Every project/experience question must name a specific artifact from the resume (a project name, a technology, a metric, a bullet point) — do not generate generic/textbook questions that could apply to any candidate.
+- Calibrate difficulty to the seniority level implied by the JD, for project and experience questions as well as behavioral ones: junior/entry-level JDs should get correctness-and-fundamentals-focused questions; senior/staff-level JDs should get systems-thinking, trade-off ownership, failure-recovery, and cross-functional impact questions grilling the same resume content harder.
+- Wherever plausible, frame the question as a challenge to a specific alternative approach the candidate did NOT take (e.g., "why not a message queue instead of polling here", "why REST instead of GraphQL for this specific use case") rather than a neutral "tell me about X" — this mirrors how a real technical interviewer pressure-tests decisions, not just asks for descriptions.`;
 
     const userPrompt = `Generate a comprehensive interview report for the following candidate:
 
@@ -113,20 +125,21 @@ ${jobDescription}`;
 // ─── Resume PDF & Template Generation ─────────────────────────────────────────
 
 async function generatePdfFromHtml(htmlContent) {
-    const browser = await puppeteer.launch({
-        args: ["--no-sandbox", "--disable-setuid-sandbox"]
-    })
+    const browser = await puppeteerService.getBrowserInstance()
     const page = await browser.newPage()
-    await page.setContent(htmlContent, { waitUntil: "networkidle0" })
+    try {
+        await page.setContent(htmlContent, { waitUntil: "networkidle0" })
 
-    const pdfBuffer = await page.pdf({
-        format: "A4",
-        printBackground: true,
-        preferCSSPageSize: true
-    })
+        const pdfBuffer = await page.pdf({
+            format: "A4",
+            printBackground: true,
+            preferCSSPageSize: true
+        })
 
-    await browser.close()
-    return pdfBuffer
+        return pdfBuffer
+    } finally {
+        await page.close()
+    }
 }
 
 const RefinedResumeSchema = z.object({
@@ -707,13 +720,11 @@ function renderResumeToHtml(data, template, fontFamily = "Arial, Helvetica, sans
 }
 
 async function optimizeResumeHtmlForOnePage(data, template, fontFamily) {
-    let browser;
+    let page;
     let html = renderResumeToHtml(data, template, fontFamily, 1.0);
     try {
-        browser = await puppeteer.launch({
-            args: ["--no-sandbox", "--disable-setuid-sandbox"]
-        });
-        const page = await browser.newPage();
+        const browser = await puppeteerService.getBrowserInstance();
+        page = await browser.newPage();
         let zoom = 1.0;
         while (zoom >= 0.7) {
             html = renderResumeToHtml(data, template, fontFamily, zoom);
@@ -732,15 +743,41 @@ async function optimizeResumeHtmlForOnePage(data, template, fontFamily) {
     } catch (err) {
         console.error("Error optimizing resume HTML:", err);
     } finally {
-        if (browser) {
-            await browser.close();
+        if (page) {
+            await page.close();
         }
     }
     return html;
 }
 
 async function generateResumeHtmlAndScore({ resume, selfDescription, jobDescription, template, fontFamily, extractedUrls = [] }) {
-    const systemPrompt = `You are an expert resume writer. Refine the user's resume/profile to target the job description. Highlight relevant experiences, use active action-driven verbs, and avoid sounding AI-generated.
+    let cacheKey = null;
+    let cachedData = null;
+
+    if (redis) {
+        try {
+            const hashInput = JSON.stringify({ resume, selfDescription, jobDescription });
+            const hash = crypto.createHash("sha256").update(hashInput).digest("hex");
+            cacheKey = `resume:${hash}`;
+            
+            const cachedString = await redis.get(cacheKey);
+            if (cachedString) {
+                cachedData = JSON.parse(cachedString);
+                console.log("Redis cache hit for refined resume");
+            }
+        } catch (cacheErr) {
+            console.error("Failed to query Redis cache:", cacheErr.message);
+        }
+    }
+
+    let refinedResumeData;
+    let matchScoreRefined;
+
+    if (cachedData) {
+        refinedResumeData = cachedData.data;
+        matchScoreRefined = cachedData.matchScoreRefined;
+    } else {
+        const systemPrompt = `You are an expert resume writer. Refine the user's resume/profile to target the job description. Highlight relevant experiences, use active action-driven verbs, and avoid sounding AI-generated.
 
 CRITICAL KEYWORD & PHRASE BOLDING REQUIREMENT:
 You must analyze the candidate's skillset and the target Job Description to strategically identify and bold high-value keywords and phrases. The bolding should be flexible and value-driven: you can bold either a single critical keyword (e.g., a key technology name like "<strong>Google ADK</strong>") or a cohesive, multi-word phrase (e.g., combining action, technology, and quantitative metrics) depending on what maximizes the value, readability, and ATS relevance of the bullet descriptions.
@@ -753,7 +790,7 @@ Examples of how to apply bolding:
 
 Apply this flexible bolding rule using <strong>...</strong> tags inside the bullet descriptions for projects ('projects'), work experience ('workExperience'), and achievements ('achievements').`;
 
-    const userPrompt = `Create a tailored resume targeting this job description.
+        const userPrompt = `Create a tailored resume targeting this job description.
 
 CRITICAL REQUIREMENT FOR CONTACT LINKS & PROJECT LINKS:
 - Look closely at the contact details of the Original Resume/Profile and the list of EXTRACTED HYPERLINKS. Extract the exact hyperlink URLs (e.g. LinkedIn profile, GitHub profile, Portfolio site) and populate the corresponding fields ('linkedin', 'github', 'portfolio') in the 'basics' object with the exact, full URL strings.
@@ -779,40 +816,54 @@ ${selfDescription || "Not provided"}
 Target Job Description:
 ${jobDescription}`;
 
-    const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt }
-        ],
-        response_format: zodResponseFormat(RefinedResumeSchema, "refined_resume"),
-        temperature: 0.7,
-    });
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ],
+            response_format: zodResponseFormat(RefinedResumeSchema, "refined_resume"),
+            temperature: 0.7,
+        });
 
-    const refinedResumeData = JSON.parse(response.choices[0].message.content);
+        refinedResumeData = JSON.parse(response.choices[0].message.content);
 
-    const scoreResponse = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-            { 
-                role: "system", 
-                content: `You are an expert ATS scanner. Score this resume JSON against the job description.
-                You must respond with a valid JSON object matching exactly this structure:
-                {
-                  "score": <number 0-100, how well the refined resume matches the job description>
-                }`
-            },
-            { 
-                role: "user", 
-                content: `Job Description:\\n${jobDescription}\\n\\nRefined Resume JSON:\\n${JSON.stringify(refinedResumeData)}` 
+        const scoreResponse = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { 
+                    role: "system", 
+                    content: `You are an expert ATS scanner. Score this resume JSON against the job description.
+                    You must respond with a valid JSON object matching exactly this structure:
+                    {
+                      "score": <number 0-100, how well the refined resume matches the job description>
+                    }`
+                },
+                { 
+                    role: "user", 
+                    content: `Job Description:\\n${jobDescription}\\n\\nRefined Resume JSON:\\n${JSON.stringify(refinedResumeData)}` 
+                }
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.2,
+        });
+
+        const scoreData = JSON.parse(scoreResponse.choices[0].message.content);
+        matchScoreRefined = scoreData.score || 85;
+
+        if (redis && cacheKey) {
+            try {
+                const ttl = 24 * 60 * 60; // 24 hours in seconds
+                await redis.set(cacheKey, JSON.stringify({
+                    data: refinedResumeData,
+                    matchScoreRefined
+                }), "EX", ttl);
+                console.log("Cached refined resume in Redis with 24h TTL");
+            } catch (cacheErr) {
+                console.error("Failed to write to Redis cache:", cacheErr.message);
             }
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.2,
-    });
-
-    const scoreData = JSON.parse(scoreResponse.choices[0].message.content);
-    const matchScoreRefined = scoreData.score || 85;
+        }
+    }
 
     const html = await optimizeResumeHtmlForOnePage(refinedResumeData, template, fontFamily);
 

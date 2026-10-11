@@ -355,23 +355,54 @@ $severity-low: #3fb950;
         flex-direction: column;
         gap: 0.4rem;
 
-        li {
-            display: flex;
-            align-items: flex-start;
-            gap: 0.5rem;
-            font-size: 0.845rem;
-            color: color.adjust($text-muted, $lightness: 12%);
-            line-height: 1.5;
+    }
+
+    &__task-item {
+        display: flex;
+        align-items: flex-start;
+        width: 100%;
+        transition: all 0.2s ease;
+
+        &--completed {
+            .roadmap-day__task-text {
+                text-decoration: line-through;
+                color: $text-muted;
+                opacity: 0.7;
+            }
         }
     }
 
-    &__bullet {
+    &__task-label {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.75rem;
+        cursor: pointer;
+        width: 100%;
+        user-select: none;
+    }
+
+    &__task-checkbox {
         flex-shrink: 0;
-        width: 5px;
-        height: 5px;
-        border-radius: 50%;
-        background-color: $accent;
-        margin-top: 0.45rem;
+        width: 15px;
+        height: 15px;
+        margin-top: 0.15rem;
+        accent-color: $accent;
+        cursor: pointer;
+        border: 1px solid $border-color;
+        border-radius: 4px;
+        background-color: $bg-input;
+        transition: all 0.2s ease;
+
+        &:hover {
+            border-color: $accent;
+        }
+    }
+
+    &__task-text {
+        font-size: 0.845rem;
+        color: color.adjust($text-muted, $lightness: 12%);
+        line-height: 1.5;
+        transition: color 0.2s ease, opacity 0.2s ease;
     }
 }
 

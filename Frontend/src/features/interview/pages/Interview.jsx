@@ -89,19 +89,30 @@ const QuestionCard = ({ item, index }) => {
     )
 }
 
-const RoadMapDay = ({ day }) => (
+const RoadMapDay = ({ day, onToggleTask }) => (
     <div className='roadmap-day'>
         <div className='roadmap-day__header'>
             <span className='roadmap-day__badge'>Day {day.day}</span>
             <h3 className='roadmap-day__focus'>{day.focus}</h3>
         </div>
         <ul className='roadmap-day__tasks'>
-            {day.tasks.map((task, i) => (
-                <li key={i}>
-                    <span className='roadmap-day__bullet' />
-                    {task}
-                </li>
-            ))}
+            {day.tasks.map((task, i) => {
+                const isCompleted = typeof task === 'string' ? false : !!task.completed;
+                const description = typeof task === 'string' ? task : task.description;
+                return (
+                    <li key={i} className={`roadmap-day__task-item ${isCompleted ? 'roadmap-day__task-item--completed' : ''}`}>
+                        <label className='roadmap-day__task-label'>
+                            <input
+                                type='checkbox'
+                                className='roadmap-day__task-checkbox'
+                                checked={isCompleted}
+                                onChange={() => onToggleTask(day.day, i, !isCompleted)}
+                            />
+                            <span className='roadmap-day__task-text'>{description}</span>
+                        </label>
+                    </li>
+                );
+            })}
         </ul>
     </div>
 )
@@ -130,7 +141,8 @@ const Interview = () => {
         startMockInterview,
         submitCandidateAnswer,
         endMockInterview,
-        fetchMockSessions
+        fetchMockSessions,
+        updatePreparationTask
     } = useInterview()
     const { interviewId } = useParams()
 
@@ -472,7 +484,13 @@ const Interview = () => {
                             </div>
                             <div className='roadmap-list'>
                                 {report.preparationPlan.map((day) => (
-                                    <RoadMapDay key={day.day} day={day} />
+                                    <RoadMapDay 
+                                        key={day.day} 
+                                        day={day} 
+                                        onToggleTask={(dayNum, taskIndex, isChecked) => 
+                                            updatePreparationTask({ day: dayNum, taskIndex, completed: isChecked })
+                                        } 
+                                    />
                                 ))}
                             </div>
                         </section>

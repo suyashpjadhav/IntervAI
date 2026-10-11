@@ -1,4 +1,4 @@
-import { getAllInterviewReports, generateInterviewReport, getInterviewReportById, generateResumePdf, changeResumeTemplate, getOriginalResume, startMockInterviewApi, submitCandidateAnswerApi, endMockInterviewApi, getMockSessionsApi } from "../services/interview.api"
+import { getAllInterviewReports, generateInterviewReport, getInterviewReportById, generateResumePdf, changeResumeTemplate, getOriginalResume, startMockInterviewApi, submitCandidateAnswerApi, endMockInterviewApi, getMockSessionsApi, updatePreparationTaskApi, getReportStatus } from "../services/interview.api"
 import { useContext, useEffect, useState } from "react"
 import { InterviewContext } from "../interview.context"
 import { useParams } from "react-router"
@@ -95,19 +95,59 @@ export const useInterview = () => {
         }
     }
 
+    // ─── Polling Helper ──────────────────────────────────────────────
+    // Polls GET /report/:id/status every 3s until completed or failed.
+    // Times out after 5 minutes (100 polls) to prevent infinite loops.
+    const pollUntilDone = (reportId) => {
+        return new Promise((resolve, reject) => {
+            let attempts = 0
+            const MAX_ATTEMPTS = 100 // 100 × 3s = 5 minutes
+
+            const interval = setInterval(async () => {
+                try {
+                    attempts++
+                    const { status } = await getReportStatus(reportId)
+
+                    if (status === "completed") {
+                        clearInterval(interval)
+                        // Fetch and return the full report from the existing endpoint
+                        const response = await getInterviewReportById(reportId)
+                        resolve(response.interviewReport)
+                    } else if (status === "failed") {
+                        clearInterval(interval)
+                        reject(new Error("Report generation failed after all retries."))
+                    } else if (attempts >= MAX_ATTEMPTS) {
+                        clearInterval(interval)
+                        reject(new Error("Report generation timed out. Please try again."))
+                    }
+                    // status === "pending" or "processing" → keep polling
+                } catch (err) {
+                    clearInterval(interval)
+                    reject(err)
+                }
+            }, 3000)
+        })
+    }
+
     const generateReport = async ({ jobDescription, selfDescription, resumeFile, template, preparationDays }) => {
         setGenerating(true)
         try {
-            const response = await generateInterviewReport({ jobDescription, selfDescription, resumeFile, template, preparationDays })
-            setReport(response.interviewReport)
-            return response.interviewReport
+            // 1. POST → server creates placeholder + enqueues job → returns 202 + reportId
+            const { reportId } = await generateInterviewReport({ jobDescription, selfDescription, resumeFile, template, preparationDays })
+
+            // 2. Poll until the background worker marks it completed
+            const report = await pollUntilDone(reportId)
+
+            // 3. Store the full report in context (same as before)
+            setReport(report)
+            return report
         } catch (error) {
             console.log(error)
             const status = error?.response?.status
             if (status === 429) {
                 alert("⚠️ AI quota exceeded. The free-tier Gemini API limit has been reached. Please wait a few minutes and try again, or upgrade your Google AI plan.")
             } else {
-                alert("Something went wrong while generating the report. Please try again.")
+                alert(error?.message || "Something went wrong while generating the report. Please try again.")
             }
             return null
         } finally {
@@ -195,6 +235,48 @@ export const useInterview = () => {
         }
     }
 
+    const updatePreparationTask = async ({ day, taskIndex, completed }) => {
+        if (!report) return
+
+        const originalPlan = report.preparationPlan
+
+        const updatedPlan = report.preparationPlan.map(d => {
+            if (d.day === day) {
+                const updatedTasks = [...d.tasks]
+                const task = updatedTasks[taskIndex]
+                if (typeof task === 'string') {
+                    updatedTasks[taskIndex] = { description: task, completed }
+                } else {
+                    updatedTasks[taskIndex] = { ...task, completed }
+                }
+                return { ...d, tasks: updatedTasks }
+            }
+            return d
+        })
+
+        setReport(prev => ({
+            ...prev,
+            preparationPlan: updatedPlan
+        }))
+
+        try {
+            const data = await updatePreparationTaskApi({ reportId: report._id, day, taskIndex, completed })
+            if (data && data.preparationPlan) {
+                setReport(prev => ({
+                    ...prev,
+                    preparationPlan: data.preparationPlan
+                }))
+            }
+        } catch (error) {
+            console.error("Error updating preparation plan task:", error)
+            setReport(prev => ({
+                ...prev,
+                preparationPlan: originalPlan
+            }))
+            alert("Failed to update task completion status. Rolled back changes.")
+        }
+    }
+
     useEffect(() => {
         if (interviewId) {
             getReportById(interviewId)
@@ -227,7 +309,8 @@ export const useInterview = () => {
         startMockInterview,
         submitCandidateAnswer,
         endMockInterview,
-        fetchMockSessions
+        fetchMockSessions,
+        updatePreparationTask
     }
 
 }
